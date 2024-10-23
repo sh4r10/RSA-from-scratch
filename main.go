@@ -3,7 +3,8 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
-	"encoding/json"
+	"encoding/asn1"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"math/big"
@@ -17,13 +18,14 @@ type KeyPair struct {
 }
 
 type PublicKey struct {
-	E       *big.Int
-	Modulus *big.Int
+	E int64
+	N *big.Int
 }
 
 type PrivateKey struct {
-	D       *big.Int
-	Modulus *big.Int
+	D *big.Int
+	N *big.Int
+	E int64
 }
 
 func main() {
@@ -117,14 +119,14 @@ func encryptText(filepath string) {
 	messageText = messageText[:len(messageText)-1] // Remove t
 
 	// Get the modulus size in bytes
-	modulusBytes := (key.Modulus.BitLen() + 7) / 8
+	modulusBytes := (key.N.BitLen() + 7) / 8
 
 	messageBytes := []byte(messageText)
 	paddedMessage := addPKCSPadding(messageBytes, modulusBytes)
 
 	message := new(big.Int).SetBytes(paddedMessage)
 
-	cipher := new(big.Int).Exp(message, key.E, key.Modulus)
+	cipher := new(big.Int).Exp(message, big.NewInt(key.E), key.N)
 	fmt.Printf("Your Cipher Text:\n\n%d\n\n", cipher)
 }
 
@@ -146,7 +148,7 @@ func decryptText(filepath string) {
 	}
 
 	// Decrypt using RSA
-	message := new(big.Int).Exp(cipher, key.D, key.Modulus)
+	message := new(big.Int).Exp(cipher, key.D, key.N)
 	messageBytes := message.Bytes()
 
 	// Remove the padding
@@ -219,25 +221,42 @@ func createNewKeyPair() KeyPair {
 
 	return KeyPair{
 		PublicKey: PublicKey{
-			E:       e,
-			Modulus: N,
+			E: e.Int64(),
+			N: N,
 		},
 		PrivateKey: PrivateKey{
-			D:       d,
-			Modulus: N,
+			D: d,
+			N: N,
 		},
 	}
 }
 
 func writeKeyToFile(filename string, keys KeyPair) {
 	// Marshal the struct into JSON
-	publicData, publicErr := json.MarshalIndent(keys.PublicKey, "", "  ")
-	privateData, privateErr := json.MarshalIndent(keys.PrivateKey, "", "  ")
+	publicData, publicErr := asn1.Marshal(keys.PublicKey)
+	privateData, privateErr := asn1.Marshal(keys.PrivateKey)
 	if publicErr != nil || privateErr != nil {
-		panic("Could not write to serialize")
+		panic("Could not encode the keys")
 	}
-	publicErr = os.WriteFile(filename+".pub", publicData, 0644)
-	privateErr = os.WriteFile(filename, privateData, 0644)
+
+	publicBlock := &pem.Block{
+		Type:  "RSA PUBLIC KEY",
+		Bytes: publicData,
+	}
+
+	privateBlock := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privateData,
+	}
+
+	publicPem := pem.EncodeToMemory(publicBlock)
+	privatePem := pem.EncodeToMemory(privateBlock)
+
+	if publicPem == nil || privatePem == nil {
+		panic("something went wrong with memory encoding")
+	}
+	publicErr = os.WriteFile(filename+".pub", publicPem, 0644)
+	privateErr = os.WriteFile(filename, privatePem, 0644)
 	if publicErr != nil || privateErr != nil {
 		panic("Could not write to file")
 	}
@@ -249,16 +268,28 @@ func readKeyFromFile(filename string) KeyPair {
 		panic("Error reading " + filename)
 	}
 
+	pemBlock, _ := pem.Decode(data)
+
+	if pemBlock == nil {
+		panic("Could not decode file")
+	}
+
 	if strings.Contains(filename, ".pub") {
 		var k PublicKey
-		err = json.Unmarshal(data, &k)
+		_, err = asn1.Unmarshal(pemBlock.Bytes, &k)
+		if err != nil {
+			panic("Could not unmarshal file")
+		}
 		return KeyPair{
 			PublicKey:  k,
 			PrivateKey: PrivateKey{},
 		}
 	} else {
 		var k PrivateKey
-		err = json.Unmarshal(data, &k)
+		_, err = asn1.Unmarshal(pemBlock.Bytes, &k)
+		if err != nil {
+			panic("Could not unmarshal file")
+		}
 		return KeyPair{
 			PrivateKey: k,
 			PublicKey:  PublicKey{},
